@@ -399,6 +399,17 @@ namespace chenc
                 return data_.size() == 1 and data_.back() == 1;
             }
             /**
+             * @brief bit count 统计 1 的数量
+             * @return 1 的数量
+             */
+            inline uint64_t bit_count() const
+            {
+                uint64_t count = 0;
+                for (auto i : data_)
+                    count += chenc::tools::bit_count(i);
+                return count;
+            }
+            /**
              * @brief bit test
              * @param index
              * @return bool
@@ -941,6 +952,49 @@ namespace chenc
             inline big_uint &operator%=(const big_uint &other)
             {
                 return *this = *this % other;
+            }
+            /**
+             * @brief 高精度除法
+             * @param dividend 被除数
+             * @param divisor 除数
+             * @param quotient 商
+             * @param remainder 余数
+             * @note 除 0 将
+             */
+            inline static void div(const big_uint &dividend,
+                                   const big_uint &divisor,
+                                   big_uint &quotient,
+                                   big_uint &remainder)
+            {
+                if (dividend.is_zero() or divisor.is_zero())
+                {
+                    quotient = big_uint();
+                    remainder = dividend;
+                    return;
+                }
+                if (divisor.is_one())
+                {
+                    quotient = dividend;
+                    remainder = 0;
+                    return;
+                }
+                // 快速除法
+                if (dividend.data_.size() <= 2 and divisor.data_.size() <= 2)
+                {
+                    uint64_t a, b;
+                    a = dividend.data_[0];
+                    b = divisor.data_[0];
+                    if (dividend.data_.size() == 2)
+                        a += uint64_t(dividend.data_[1]) * (uint64_t(1) << 32);
+                    if (divisor.data_.size() == 2)
+                        b += uint64_t(divisor.data_[1]) * (uint64_t(1) << 32);
+
+                    quotient = a / b;
+                    remainder = a % b;
+                    return true;
+                }
+
+                division_newton_raphson(quotient, remainder, quotient, remainder);
             }
 
             // -------- 输出函数 --------
@@ -1718,35 +1772,6 @@ namespace chenc
         };
 
     }
-}
-
-chenc::big_int::big_uint operator"" _ccuint(const char *str, uint64_t size)
-{
-    if (size == 0)
-        return chenc::big_int::big_uint(0);
-    if (size == 1)
-        return chenc::big_int::big_uint::from_str<10>({str, size});
-    if (size == 2)
-        if (str[0] == '0')
-            if (str[1] == 'x' || str[1] == 'X')
-                return chenc::big_int::big_uint(0);
-            else if (str[1] == 'b' || str[1] == 'B')
-                return chenc::big_int::big_uint(0);
-            else
-                return chenc::big_int::big_uint::from_str<8>({str + 1, size - 1});
-        else
-            return chenc::big_int::big_uint::from_str<10>({str, size});
-    if (size > 2)
-        if (str[0] == '0')
-            if (str[1] == 'x' || str[1] == 'X')
-                return chenc::big_int::big_uint::from_str<16>({str + 2, size - 2});
-            else if (str[1] == 'b' || str[1] == 'B')
-                return chenc::big_int::big_uint::from_str<2>({str + 2, size - 2});
-            else
-                return chenc::big_int::big_uint::from_str<8>({str + 1, size - 1});
-        else
-            return chenc::big_int::big_uint::from_str<10>({str, size});
-    return chenc::big_int::big_uint(0);
 }
 
 namespace std
