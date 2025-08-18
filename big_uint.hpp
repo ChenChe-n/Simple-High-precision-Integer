@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <concepts>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace chenc
 {
@@ -45,9 +47,66 @@ namespace chenc
                 return 0;
             return (sizeof(T) * 8 - 1) - std::countl_zero(n);
         }
+        /**
+         * @brief abs
+         * @param n
+         * @return 绝对值
+         */
+        template <typename T>
+            requires std::integral<T>
+        inline static constexpr auto abs(const T &n) noexcept
+        {
+            if constexpr (std::signed_integral<T>)
+            {
+                using U = std::make_unsigned_t<T>;
+                if (n == std::numeric_limits<T>::lowest())
+                {
+                    // 特殊处理 INT_MIN
+                    return static_cast<U>(std::numeric_limits<T>::max()) + 1;
+                }
+                return static_cast<U>(n < 0 ? -n : n);
+            }
+            else
+            {
+                return n; // 无符号类型直接返回
+            }
+        }
+
     }
     namespace big_int
     {
+        class division_by_zero : public ::std::runtime_error
+        {
+        public:
+            inline division_by_zero()
+                : ::std::runtime_error("Division by zero")
+            {
+            }
+            inline division_by_zero(const char *message)
+                : ::std::runtime_error(message)
+            {
+            }
+            inline division_by_zero(const std::string &message)
+                : std::runtime_error(message)
+            {
+            }
+        };
+        class invalid_argument : public ::std::runtime_error
+        {
+        public:
+            inline invalid_argument()
+                : ::std::runtime_error("Invalid argument")
+            {
+            }
+            inline invalid_argument(const char *message)
+                : ::std::runtime_error(message)
+            {
+            }
+            inline invalid_argument(const std::string &message)
+                : std::runtime_error(message)
+            {
+            }
+        };
         /**
          * @class big_uint
          * @brief 大整数类，支持无符号大整数运算
@@ -93,7 +152,7 @@ namespace chenc
                 requires std::signed_integral<T> && (sizeof(T) <= sizeof(uint64_t))
             inline big_uint(const T &value, const uint64_t &capacity = def_cap_)
             {
-                const uint64_t v = static_cast<uint64_t>(value);
+                const uint64_t v = chenc::tools::abs(value);
                 data_.reserve(calc_blocks(capacity));
                 data_.push_back(v & UINT32_MAX);
                 if (v > UINT32_MAX)
@@ -109,6 +168,7 @@ namespace chenc
             inline static big_uint from_str(const std::string_view &str,
                                             const uint64_t &capacity = def_cap_)
             {
+                static_assert(base >= 2 && base <= 36, "base must be between 2 and 36");
                 static std::array<int8_t, 128> chars_base = []() -> std::array<int8_t, 128>
                 {
                     std::array<int8_t, 128> result = {0};
@@ -220,6 +280,10 @@ namespace chenc
                             const uint64_t &base = 10,
                             const uint64_t &capacity = def_cap_)
             {
+                if (base < 2 || base > 36)
+                {
+                    throw std::invalid_argument("chenc::big_int::big_uint.to_string base must be between 2 and 36");
+                }
 #define CHENC_DEFINE_CASE(val)                        \
     case val:                                         \
         data_ = (from_str<val>(str, capacity).data_); \
@@ -517,6 +581,8 @@ namespace chenc
                 for (uint64_t i = 0; i < data_.size(); i++)
                     data_[i] |= other.data_[i];
 
+                trim();
+
                 return *this;
             }
             /**
@@ -545,6 +611,8 @@ namespace chenc
                 for (uint64_t i = 0; i < data_.size(); i++)
                     data_[i] &= other.data_[i];
 
+                trim();
+
                 return *this;
             }
             /**
@@ -572,6 +640,8 @@ namespace chenc
 
                 for (uint64_t i = 0; i < data_.size(); i++)
                     data_[i] ^= other.data_[i];
+
+                trim();
 
                 return *this;
             }
@@ -665,12 +735,7 @@ namespace chenc
                 }
 
                 // 移除前导零
-                while (result.size() > 1 && result.back() == 0)
-                {
-                    result.pop_back();
-                }
-
-                return big_uint(std::move(result));
+                return big_uint(std::move(result)).trim();
             }
             /**
              * @brief 左移赋值运算符
@@ -726,12 +791,7 @@ namespace chenc
                 }
 
                 // 移除前导零
-                while (result.size() > 1 && result.back() == 0)
-                {
-                    result.pop_back();
-                }
-
-                return big_uint(std::move(result));
+                return big_uint(std::move(result)).trim();
             }
             /**
              * @brief 右移赋值运算符
@@ -882,11 +942,12 @@ namespace chenc
              * @brief 除法运算符
              * @param other 除数
              * @return 新对象
-             * @note this/0 = 0
              */
             inline big_uint operator/(const big_uint &other) const
             {
-                if (is_zero() or other.is_zero())
+                if (other.is_zero())
+                    throw division_by_zero("chenc::big_int::big_uint.operator/ division_by_zero");
+                if (is_zero())
                     return big_uint();
                 if (other.is_one())
                     return *this;
@@ -966,7 +1027,11 @@ namespace chenc
                                    big_uint &quotient,
                                    big_uint &remainder)
             {
-                if (dividend.is_zero() or divisor.is_zero())
+                if (divisor.is_zero())
+                {
+                    throw division_by_zero("chenc::big_int::big_uint::div division_by_zero");
+                }
+                if (dividend.is_zero())
                 {
                     quotient = big_uint();
                     remainder = dividend;
@@ -991,10 +1056,84 @@ namespace chenc
 
                     quotient = a / b;
                     remainder = a % b;
-                    return true;
+                    return;
                 }
 
-                division_newton_raphson(quotient, remainder, quotient, remainder);
+                division_newton_raphson(dividend, divisor, quotient, remainder);
+            }
+            /**
+             * @brief 最大公因数 GDC
+             * @param a
+             * @param b
+             * @return 结果
+             */
+            inline static big_uint gcd(const big_uint &a, const big_uint &b)
+            {
+                if (a.is_zero() || b.is_zero())
+                    return big_uint(0);
+
+                auto x = a, y = b;
+
+                while (!(y ^= x ^= y ^= x %= y).is_zero())
+                {
+                }
+                return x;
+            }
+            /**
+             * @brief 最小公倍数 LCM
+             * @param a
+             * @param b
+             * @return 结果
+             */
+            inline static big_uint lcm(const big_uint &a, const big_uint &b)
+            {
+                return a * b / gcd(a, b);
+            }
+            /**
+             * @brief pow 幂次函数
+             * @param a 底数
+             * @param b 幂次
+             * @return 结果
+             */
+            inline static big_uint pow(const big_uint &a, const uint64_t &b)
+            {
+                if (b == 0)
+                {
+                    return big_uint(1);
+                }
+                if (a == 0)
+                {
+                    return 0;
+                }
+                if (b == 1)
+                {
+                    return a;
+                }
+                // 特殊优化：如果a是2的幂次，则使用位移操作
+                if (a.bit_count() == 1)
+                {
+                    return a << ((b - 1) * a.bits());
+                }
+
+                // 使用快速幂算法
+                big_uint result = 1;
+                big_uint base = a;
+                uint64_t exp = b;
+
+                while (exp > 0)
+                {
+                    // 如果指数是奇数，将当前底数乘入结果
+                    if (exp & 1)
+                    {
+                        result *= base;
+                    }
+
+                    // 底数平方，指数减半
+                    base *= base;
+                    exp >>= 1;
+                }
+
+                return result;
             }
 
             // -------- 输出函数 --------
@@ -1004,143 +1143,235 @@ namespace chenc
              * @return 指定进制的字符串表示
              */
             template <uint64_t base = 10>
-            inline std::string to_string() const
+            inline std::string to_string_template() const
             {
-                if (base == 2)
-                    return to_string_base_2();
-                if (base == 10)
-                    return to_string_base_10();
-                if (base == 16)
-                    return to_string_base_16();
-
-                // 检查进制范围
-                if (base < 2 || base > 36)
-                    return "";
-                if (is_zero())
-                    return "0";
-
-                static std::array<char, 36> base_chars = {
-                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-                    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
-                    'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
-                    'u', 'v', 'w', 'x', 'y', 'z'};
-
-                // 快速处理小数 (使用更多位可以处理更大的数)
-                if (data_.size() <= 2)
+                static_assert(base >= 2 && base <= 36, "chenc::big_int::big_uint.to_string_template base must be between 2 and 36");
+                if constexpr (base == 2)
                 {
-                    uint64_t value = data_[0];
-                    if (data_.size() == 2)
-                        value |= (uint64_t(data_[1]) << 32);
+                    return to_string_base_2();
+                }
+                else if constexpr (base == 10)
+                {
+                    return to_string_base_10();
+                }
+                else if constexpr (base == 16)
+                {
+                    return to_string_base_16();
+                }
+                else
+                { // 检查进制范围
+                    if (base < 2 || base > 36)
+                        return "";
+                    if (is_zero())
+                        return "0";
+
+                    static std::array<char, 36> base_chars = {
+                        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+                        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
+                        'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
+                        'u', 'v', 'w', 'x', 'y', 'z'};
+
+                    // 快速处理小数 (使用更多位可以处理更大的数)
+                    if (data_.size() <= 2)
+                    {
+                        uint64_t value = data_[0];
+                        if (data_.size() == 2)
+                            value |= (uint64_t(data_[1]) << 32);
+
+                        std::string result;
+                        do
+                        {
+                            result.push_back(base_chars[value % base]);
+                            value /= base;
+                        } while (value > 0);
+
+                        std::reverse(result.begin(), result.end());
+                        return result;
+                    }
+
+                    // 预计算最优块大小
+                    uint64_t optimal_base = []()
+                    {
+                        uint64_t b = base;
+                        uint32_t count = 1;
+                        while (count < 9 && b <= UINT32_MAX / base)
+                        {
+                            b *= base;
+                            count++;
+                        }
+                        return b;
+                    }();
+
+                    uint32_t optimal_digits = []()
+                    {
+                        uint64_t b = base;
+                        uint32_t count = 1;
+                        while (count < 9 && b <= UINT32_MAX / base)
+                        {
+                            b *= base;
+                            count++;
+                        }
+                        return count;
+                    }();
+
+                    // 预估结果长度
+                    const uint64_t bits_count = bits();
+                    const uint64_t approx_digits = static_cast<uint64_t>(
+                        std::ceil(bits_count * std::log2(2) / std::log2(base)) + 10);
 
                     std::string result;
-                    do
+                    result.reserve(approx_digits);
+
+                    // 使用临时副本
+                    big_uint temp(*this);
+
+                    // 存储余数
+                    std::vector<uint32_t> remainders;
+                    remainders.reserve((temp.data_.size() * 32 + optimal_digits - 1) / optimal_digits);
+
+                    // 使用大基数进行除法
+                    while (!temp.is_zero())
                     {
-                        result.push_back(base_chars[value % base]);
-                        value /= base;
-                    } while (value > 0);
+                        uint64_t remainder = 0;
 
-                    std::reverse(result.begin(), result.end());
-                    return result;
-                }
-
-                // 预计算最优块大小
-                uint64_t optimal_base = []()
-                {
-                    uint64_t b = base;
-                    uint32_t count = 1;
-                    while (count < 9 && b <= UINT32_MAX / base)
-                    {
-                        b *= base;
-                        count++;
-                    }
-                    return b;
-                }();
-
-                uint32_t optimal_digits = []()
-                {
-                    uint64_t b = base;
-                    uint32_t count = 1;
-                    while (count < 9 && b <= UINT32_MAX / base)
-                    {
-                        b *= base;
-                        count++;
-                    }
-                    return count;
-                }();
-
-                // 预估结果长度
-                const uint64_t bits_count = bits();
-                const uint64_t approx_digits = static_cast<uint64_t>(
-                    std::ceil(bits_count * std::log2(2) / std::log2(base)) + 10);
-
-                std::string result;
-                result.reserve(approx_digits);
-
-                // 使用临时副本
-                big_uint temp(*this);
-
-                // 存储余数
-                std::vector<uint32_t> remainders;
-                remainders.reserve((temp.data_.size() * 32 + optimal_digits - 1) / optimal_digits);
-
-                // 使用大基数进行除法
-                while (!temp.is_zero())
-                {
-                    uint64_t remainder = 0;
-
-                    // 从高位到低位执行除法
-                    for (int64_t i = temp.data_.size() - 1; i >= 0; --i)
-                    {
-                        uint64_t dividend = (uint64_t(remainder) << 32) | temp.data_[i];
-                        temp.data_[i] = static_cast<uint32_t>(dividend / optimal_base);
-                        remainder = dividend % optimal_base;
-                    }
-
-                    remainders.push_back(static_cast<uint32_t>(remainder));
-                    temp.trim();
-                }
-
-                // 处理余数并构建结果
-                bool is_first = true;
-                for (auto it = remainders.rbegin(); it != remainders.rend(); ++it)
-                {
-                    uint32_t value = *it;
-
-                    if (is_first)
-                    {
-                        // 第一块特殊处理（不需要前导零）
-                        if (value != 0)
+                        // 从高位到低位执行除法
+                        for (int64_t i = temp.data_.size() - 1; i >= 0; --i)
                         {
+                            uint64_t dividend = (uint64_t(remainder) << 32) | temp.data_[i];
+                            temp.data_[i] = static_cast<uint32_t>(dividend / optimal_base);
+                            remainder = dividend % optimal_base;
+                        }
+
+                        remainders.push_back(static_cast<uint32_t>(remainder));
+                        temp.trim();
+                    }
+
+                    // 处理余数并构建结果
+                    bool is_first = true;
+                    for (auto it = remainders.rbegin(); it != remainders.rend(); ++it)
+                    {
+                        uint32_t value = *it;
+
+                        if (is_first)
+                        {
+                            // 第一块特殊处理（不需要前导零）
+                            if (value != 0)
+                            {
+                                std::string chunk;
+                                do
+                                {
+                                    chunk.push_back(base_chars[value % base]);
+                                    value /= base;
+                                } while (value > 0);
+
+                                std::reverse(chunk.begin(), chunk.end());
+                                result.append(chunk);
+                            }
+                            is_first = false;
+                        }
+                        else
+                        {
+                            // 后续块需要固定长度
                             std::string chunk;
-                            do
+                            chunk.reserve(optimal_digits);
+
+                            for (uint32_t j = 0; j < optimal_digits; ++j)
                             {
                                 chunk.push_back(base_chars[value % base]);
                                 value /= base;
-                            } while (value > 0);
+                            }
 
                             std::reverse(chunk.begin(), chunk.end());
                             result.append(chunk);
                         }
-                        is_first = false;
                     }
-                    else
-                    {
-                        // 后续块需要固定长度
-                        std::string chunk;
-                        chunk.reserve(optimal_digits);
 
-                        for (uint32_t j = 0; j < optimal_digits; ++j)
-                        {
-                            chunk.push_back(base_chars[value % base]);
-                            value /= base;
-                        }
-
-                        std::reverse(chunk.begin(), chunk.end());
-                        result.append(chunk);
-                    }
+                    return result.empty() ? "0" : result;
                 }
+            }
+            /**
+             * @brief 通用进制字符串转换 (2-36进制)
+             * @tparam base 进制 (2-36)
+             * @return 指定进制的字符串表示
+             */
+            inline std::string to_string(const uint64_t &base = 10) const
+            {
+                if (base < 2 || base > 36)
+                {
+                    throw invalid_argument("chenc::big_int::big_uint.to_string base must be between 2 and 36");
+                }
+#define CHENC_DEFINE_CASE(val)            \
+    case val:                             \
+        return to_string_template<val>(); \
+        break;
 
-                return result.empty() ? "0" : result;
+                switch (base)
+                {
+                    CHENC_DEFINE_CASE(2);
+                    CHENC_DEFINE_CASE(3);
+                    CHENC_DEFINE_CASE(4);
+                    CHENC_DEFINE_CASE(5);
+                    CHENC_DEFINE_CASE(6);
+                    CHENC_DEFINE_CASE(7);
+                    CHENC_DEFINE_CASE(8);
+                    CHENC_DEFINE_CASE(9);
+                    CHENC_DEFINE_CASE(10);
+                    CHENC_DEFINE_CASE(11);
+                    CHENC_DEFINE_CASE(12);
+                    CHENC_DEFINE_CASE(13);
+                    CHENC_DEFINE_CASE(14);
+                    CHENC_DEFINE_CASE(15);
+                    CHENC_DEFINE_CASE(16);
+                    CHENC_DEFINE_CASE(17);
+                    CHENC_DEFINE_CASE(18);
+                    CHENC_DEFINE_CASE(19);
+                    CHENC_DEFINE_CASE(20);
+                    CHENC_DEFINE_CASE(21);
+                    CHENC_DEFINE_CASE(22);
+                    CHENC_DEFINE_CASE(23);
+                    CHENC_DEFINE_CASE(24);
+                    CHENC_DEFINE_CASE(25);
+                    CHENC_DEFINE_CASE(26);
+                    CHENC_DEFINE_CASE(27);
+                    CHENC_DEFINE_CASE(28);
+                    CHENC_DEFINE_CASE(29);
+                    CHENC_DEFINE_CASE(30);
+                    CHENC_DEFINE_CASE(31);
+                    CHENC_DEFINE_CASE(32);
+                    CHENC_DEFINE_CASE(33);
+                    CHENC_DEFINE_CASE(34);
+                    CHENC_DEFINE_CASE(35);
+                    CHENC_DEFINE_CASE(36);
+                default:
+                    return "base out of range";
+                }
+#undef CHENC_DEFINE_CASE
+            }
+            /**
+             * @brief 浮点数字符串转换
+             * @tparam len 小数点位数
+             * @return 科学计数法的字符串表示
+             */
+            inline std::string to_float_string(const uint64_t &len = 5, const bool &pad_with_zeros = false) const
+            {
+                if (is_zero())
+                    return "0";
+
+                std::string str = to_string_template<10>();
+                std::string result;
+
+                result.reserve(len + 10);
+
+                result.push_back(str[0]);
+                result.push_back('.');
+                if (len >= 1)
+                    result.append(str.substr(1, len));
+                if (pad_with_zeros == true and result.size() - 2 < len)
+                    result.append(std::string(len - (result.size() - 2), '0'));
+                result.append("e+");
+                result.append(std::to_string(str.size() - 1));
+
+                return result;
             }
             /**
              * @brief 转换函数
@@ -1156,6 +1387,28 @@ namespace chenc
                     value |= static_cast<uint64_t>(data_[1]) << 32;
                 return static_cast<T>(value);
             }
+            /**
+             * @brief 转换函数
+             * @tparam 目标类型
+             * @return 转换后的值
+             * @note 溢出将初始化为正无穷
+             */
+            template <typename T>
+                requires std::floating_point<T>
+            inline explicit operator T() const
+            {
+                T value = 0.0;
+                auto float_precision = std::numeric_limits<T>::digits; // 浮点数精度
+
+                // 循环计算
+                for (uint64_t i = 0; (i * 32 <= float_precision + 31) and (i < data_.size()); i++)
+                {
+                    value += static_cast<T>(data_[(data_.size() - 1) - i]) *
+                             std::pow(2.0, ((data_.size() - 1 - i) * 32));
+                }
+
+                return value;
+            }
 
             // -------- 友元函数 --------
             inline friend std::ostream &operator<<(std::ostream &os, const big_uint &value)
@@ -1164,15 +1417,15 @@ namespace chenc
                 auto ios = os.flags();
                 if (ios & std::ios::hex)
                 {
-                    os << value.to_string<16>();
+                    os << value.to_string_template<16>();
                 }
                 else if (ios & std::ios::oct)
                 {
-                    os << value.to_string<8>();
+                    os << value.to_string_template<8>();
                 }
                 else if (ios & std::ios::dec)
                 {
-                    os << value.to_string<10>();
+                    os << value.to_string_template<10>();
                 }
                 return os;
             }
@@ -1746,10 +1999,11 @@ namespace chenc
             /**
              * @brief 去除前导 0
              */
-            inline void trim()
+            inline big_uint &trim()
             {
                 while (data_.size() >= 2 and data_.back() == 0)
                     data_.pop_back();
+                return *this;
             }
             /**
              * @brief 计算需要的32位块数量
@@ -1768,7 +2022,7 @@ namespace chenc
              */
             std::vector<uint32_t> data_;
             // 默认容量
-            inline static uint64_t def_cap_ = 128;
+            inline static constexpr uint64_t def_cap_ = 256;
         };
 
     }
@@ -1781,7 +2035,7 @@ namespace std
     {
         std::size_t operator()(const chenc::big_int::big_uint &big_uint) const
         {
-            return std::hash<std::string>()(big_uint.to_string<16>());
+            return std::hash<std::string>()(big_uint.to_string_template<16>());
         }
     };
 }
