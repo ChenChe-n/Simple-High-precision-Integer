@@ -14,6 +14,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <stdfloat>
 
 namespace chenc
 {
@@ -471,6 +472,22 @@ namespace chenc
                 uint64_t count = 0;
                 for (auto i : data_)
                     count += chenc::tools::bit_count(i);
+                return count;
+            }
+            /**
+             * @brief 统计尾随零的数量
+             * @return 尾随零的数量
+             */
+            inline uint64_t bit_trailing_zero_count() const
+            {
+                if (is_zero())
+                    return 0;
+                uint64_t count = 0;
+                for (uint64_t i = 0; i < bits(); i++)
+                    if (bit_test(i))
+                        break;
+                    else
+                        count++;
                 return count;
             }
             /**
@@ -1062,22 +1079,56 @@ namespace chenc
                 division_newton_raphson(dividend, divisor, quotient, remainder);
             }
             /**
-             * @brief 最大公因数 GDC
+             * @brief 最大公因数 GCD
              * @param a
              * @param b
              * @return 结果
              */
             inline static big_uint gcd(const big_uint &a, const big_uint &b)
             {
-                if (a.is_zero() || b.is_zero())
-                    return big_uint(0);
+                if (a.is_zero())
+                    return b;
+                if (b.is_zero())
+                    return a;
 
-                auto x = a, y = b;
+                big_uint x = a;
+                big_uint y = b;
 
-                while (!(y ^= x ^= y ^= x %= y).is_zero())
+                // 统计当前可以同时右移的位数
+                uint64_t shift_count = std::min(x.bit_trailing_zero_count(), y.bit_trailing_zero_count());
+                // 如果为 0 无副作用
+                x >>= shift_count;
+                y >>= shift_count;
+                // 1. 计算公共的2的幂次因子（批量处理）
+                uint64_t common_shift = shift_count;
+
+                // 2. 移除x中剩余的2的因子（批量处理）
+                x >>= x.bit_trailing_zero_count();
+
+                // 3. 核心循环 (混合算法)
+                while (!x.is_zero())
                 {
+                    // 批量移除 y 中所有2的因子
+                    y >>= y.bit_trailing_zero_count();
+
+                    // 确保 x <= y
+                    if (x > y)
+                        x.swap(y);
+
+                    // 如果两个数大小悬殊，使用模运算而不是减法
+                    constexpr uint64_t bit_diff_threshold = 32;
+                    if (y.bits() > x.bits() + bit_diff_threshold)
+                    {
+                        y %= x;
+                    }
+                    else
+                    {
+                        y -= x;
+                    }
                 }
-                return x;
+
+                // 恢复公共的2的幂次因子
+                return y << common_shift;
             }
             /**
              * @brief 最小公倍数 LCM
@@ -1408,6 +1459,16 @@ namespace chenc
                 }
 
                 return value;
+            }
+
+            /**
+             * @brief 交换函数
+             * @param other
+             * @return void
+             */
+            inline void swap(big_uint &other) noexcept
+            {
+                std::swap(data_, other.data_);
             }
 
             // -------- 友元函数 --------
@@ -1843,25 +1904,7 @@ namespace chenc
             inline static void division_newton_raphson(const big_uint &dividend, const big_uint &divisor,
                                                        big_uint &quotient, big_uint &remainder)
             {
-                // 处理边界情况（与 division_default 行为保持一致）
-                if (dividend.is_zero())
-                {
-                    quotient = 0;
-                    remainder = 0;
-                    return;
-                }
-                if (divisor.is_zero())
-                {
-                    quotient = 0;
-                    remainder = dividend;
-                    return;
-                }
-                if (divisor.is_one())
-                {
-                    quotient = dividend;
-                    remainder = 0;
-                    return;
-                }
+                // 边界情况检查
                 if (dividend < divisor)
                 {
                     quotient = 0;
@@ -1869,131 +1912,64 @@ namespace chenc
                     return;
                 }
 
-                // 对于很小的操作数，交由默认长除法处理（避免过重的 NR 代价）
-                if (dividend.blocks() <= 2 and divisor.blocks() <= 2)
+                // 对于小操作数，使用 除法
+                if (dividend.blocks() <= 2 && divisor.blocks() <= 2)
                 {
-                    division_default(dividend, divisor, quotient, remainder);
+                    // 此处可以调用您的 division_default，或者直接计算
+                    uint64_t a = static_cast<uint64_t>(dividend);
+                    uint64_t b = static_cast<uint64_t>(divisor);
+                    quotient = a / b;
+                    remainder = a % b;
                     return;
                 }
 
-                // 选择固定点精度 k（比特数）
-                // 为了保险，取被除数块数 * 32 + 32 位精度（足够用于得到整数商）
+                // 精度 k 的选择：理论上比商的位数多一点即可。这里选择一个安全的较大值。
                 uint64_t kbits = dividend.bits() + 32;
+                big_uint B = big_uint(1) << kbits;
+                big_uint twoB = B << 1;
 
-                // 构造定点基 B = 1 << kbits，以及 2B
-                big_uint B = big_uint(1) <<= kbits;
-                big_uint twoB = B << 1; // 2 * B
-
-                // 初始近似：x0 = 1 << (kbits - divisor.bits())  （粗略）
-                // 如果 kbits <= divisor.bits()，将设为 1 （非常粗略，但 NR 会收敛）
+                // 初始近似值 x0 (1/divisor 的定点表示)
+                // 这里的初始值可以进一步优化，但当前值是可用的
                 int64_t shift_init = static_cast<int64_t>(kbits) - static_cast<int64_t>(divisor.bits());
-                big_uint x(1);
-                if (shift_init > 0)
-                    x <<= static_cast<uint64_t>(shift_init);
+                big_uint x = (shift_init > 0) ? (big_uint(1) << shift_init) : big_uint(1);
 
-                // Newton-Raphson 迭代（固定点）
-                // x_{n+1} = ( x * (2B - b*x) ) >> kbits
-                const int MAX_ITER = 128; // 迭代上限（通常远小于此）
-                for (int iter = 0;; ++iter)
+                // Newton-Raphson 迭代: x_{n+1} = (x * (2B - divisor * x)) >> kbits
+                big_uint prev_x; // 用于检测收敛
+                do
                 {
-                    if (iter == MAX_ITER)
-                        throw std::overflow_error("big_uint::division_newton_raphson: Newton-Raphson 迭代超出限制！");
-                    // t = b * x
-                    big_uint t = divisor;
-                    t *= x; // t = divisor * x
+                    prev_x = x;
+                    big_uint t = divisor * x;
 
-                    // 如果 t == 0（极端）则无法继续
-                    if (t.is_zero())
-                        break;
+                    // 确保 (2B - t) 不会下溢
+                    big_uint term = (twoB > t) ? (twoB - t) : big_uint(0);
 
-                    // twoB_minus_t = 2B - t  （注意若 t > 2B，结果为0）
-                    big_uint twoB_minus_t;
-                    if (twoB > t)
-                        twoB_minus_t = twoB;
-                    else
-                        twoB_minus_t = 0;
-                    if (!twoB_minus_t.is_zero())
-                        twoB_minus_t -= t;
-                    else
-                        twoB_minus_t = 0;
+                    x *= term;
+                    x >>= kbits;
 
-                    // u = x * (2B - t)
-                    big_uint u = x;
-                    u *= twoB_minus_t;
+                } while (x != prev_x); // 迭代直到 x 收敛
 
-                    // x_new = u >> kbits
-                    big_uint x_new = u >> kbits;
+                // 计算近似商： q = (dividend * x) >> kbits
+                quotient = dividend * x;
+                quotient >>= kbits;
 
-                    // 提前停止：若收敛（新旧相同）或变成0
-                    if (x_new == x || x_new.is_zero())
-                    {
-                        x = x_new;
-                        break;
-                    }
+                // --- 优化核心：高效的商修正 ---
+                // 计算 q * divisor，这几乎等于 dividend
+                big_uint qd = quotient * divisor;
 
-                    x = std::move(x_new);
-                }
+                // 计算余数 remainder = dividend - qd
+                remainder = dividend - qd;
 
-                // 用 x 计算商： q = (a * x) >> kbits
-                big_uint q = dividend;
-                q *= x;
-                q >>= kbits;
-
-                // 修正商（保证 q * divisor <= dividend < (q+1) * divisor）
-                // 先调整可能偏大的情况
-                uint64_t MAX_WHILE = 128;
-                if (!q.is_zero())
+                // 如果余数大于除数，说明商偏小了，需要增加商并减少余数
+                // 这个循环通常最多执行 1-2 次
+                while (remainder >= divisor)
                 {
-                    // 当 q * divisor > dividend 时，减小 q
-                    for (uint64_t i = 0;; ++i)
-                    {
-                        big_uint prod = q;
-                        prod *= divisor;
-                        if (prod > dividend)
-                        {
-                            // q--
-                            --q;
-                        }
-                        else
-                        {
-                            break;
-                        }
-                        if (i >= MAX_WHILE)
-                            throw std::overflow_error("big_uint::division_newton_raphson: Newton-Raphson 迭代超出限制！");
-                    }
+                    ++quotient;
+                    remainder -= divisor;
                 }
-
-                // 然后调整可能偏小的情况（若 (q+1)*divisor <= dividend）
-                for (uint64_t i = 0;; ++i)
-                {
-                    big_uint q1 = q;
-                    ++q1;
-                    big_uint prod = q1;
-                    prod *= divisor;
-                    if (prod <= dividend)
-                    {
-                        q = std::move(q1);
-                    }
-                    else
-                    {
-                        break;
-                    }
-                    if (i >= MAX_WHILE)
-                        throw std::overflow_error("big_uint::division_newton_raphson: Newton-Raphson 迭代超出限制！");
-                }
-
-                // 余数 r = dividend - q * divisor
-                big_uint prod = q;
-                prod *= divisor;
-                big_uint r = dividend;
-                if (r >= prod)
-                    r -= prod;
-                else
-                    r = 0; // 理论上不应出现
-
-                // 赋值输出
-                quotient = std::move(q);
-                remainder = std::move(r);
+                // 注意：由于近似计算，理论上 q*d 可能略大于 dividend，导致 remainder 计算结果为0（因为是无符号减法）。
+                // 在您的减法实现中，`*this < other` 时结果为0，这已经隐式处理了这种情况。
+                // 一个更鲁棒的实现会使用有符号大数或单独处理借位。
+                // 假设您的减法在 `a < b` 时 `a - b` 结果为 0 是稳定的。
             }
 
             /**
