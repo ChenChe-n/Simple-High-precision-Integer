@@ -9,7 +9,7 @@
 #include <cmath>
 #include <bit>
 
-#include "../time/time.hpp" 
+#include "../time/time.hpp"
 
 namespace chenc::tools
 {
@@ -31,9 +31,7 @@ namespace chenc::tools
      * @tparam FLOAT_TYPE 浮点数类型
      * @note 此函数假定平台使用小端字节序 (Little-Endian)
      * @note 对于 128-bit 和 80-bit 类型，字节序问题会影响结果的正确性
-     * @note max_bits 最大精度限制为64时，精度已远大于双精度浮点数，默认256则更远远大于正常浮点数
-     * @note 十进制有效精度计算公式 log2(64)≈19.2 log2(256)≈77 log2(512)≈154 log2(1024)≈308 log2(2048)≈616
-     * @note 实际为避免中间计算溢出精度，应预留足够的有效精度
+
      */
     template <typename FLOAT_TYPE>
         requires std::floating_point<FLOAT_TYPE>
@@ -229,17 +227,21 @@ namespace chenc::big_int
      * @class fraction
      * @brief 分数类，支持有理数运算
      * @note 使用 big_uint 作为底层实现，支持高精度分数运算
+     * @note max_bits 最大精度限制为64时，精度已远大于双精度浮点数，默认128则更远远大于正常浮点数
+     * @note 十进制有效精度计算公式 log2(64)≈19.2 log2(256)≈77 log2(512)≈154 log2(1024)≈308 log2(2048)≈616
+     * @note 实际为避免中间计算溢出精度，应预留足够的有效精度
      */
     class fraction
     {
     private:
         using big_uint = chenc::big_int::big_uint;
+        inline static constexpr uint64_t def_max_bits_ = 256;
 
     public:
         /**
          * @brief 默认构造函数，构造值为0的分数
          */
-        inline fraction(const uint64_t &max_bits = 256)
+        inline fraction(const uint64_t &max_bits = def_max_bits_)
             : numerator_(0), denominator_(1), is_negative_(false), max_bits_(max_bits)
         {
         }
@@ -250,7 +252,7 @@ namespace chenc::big_int
          * @param denominator 分母
          * @param max_bits 最大精度限制
          */
-        inline fraction(const big_uint &numerator, const big_uint &denominator, const uint64_t &max_bits = 256)
+        inline fraction(const big_uint &numerator, const big_uint &denominator, const uint64_t &max_bits = def_max_bits_)
             : numerator_(numerator), denominator_(denominator), is_negative_(false), max_bits_(max_bits)
         {
             // 化简分数
@@ -267,7 +269,7 @@ namespace chenc::big_int
          */
         template <typename T1, typename T2>
             requires std::integral<T1> && (sizeof(T1) <= sizeof(uint64_t)) && std::integral<T2> && (sizeof(T2) <= sizeof(uint64_t))
-        inline fraction(const T1 &numerator, const T2 &denominator, const uint64_t &max_bits = 256)
+        inline fraction(const T1 &numerator, const T2 &denominator, const uint64_t &max_bits = def_max_bits_)
             : numerator_(numerator), denominator_(denominator), is_negative_((numerator < 0) ^ (denominator < 0)), max_bits_(max_bits)
         {
             numerator_ = numerator;
@@ -285,7 +287,7 @@ namespace chenc::big_int
          */
         template <typename T1>
             requires std::floating_point<T1>
-        inline fraction(const T1 &value, const uint64_t &max_bits = 256)
+        inline fraction(const T1 &value, const uint64_t &max_bits = def_max_bits_)
             : max_bits_(max_bits)
         {
             uint64_t mantissa[2];
@@ -335,7 +337,7 @@ namespace chenc::big_int
          * @param max_bits 最大精度限制
          * @note 字符串需要为 科学计数法 或 小数格式 或 整数格式
          */
-        inline fraction(const std::string_view &str, const uint64_t &max_bits = 256)
+        inline fraction(const std::string_view &str, const uint64_t &max_bits = def_max_bits_)
             : max_bits_(max_bits)
         {
             if (str.empty())
@@ -617,6 +619,15 @@ namespace chenc::big_int
                 simplify();
             max_bits_ = value;
             return *this;
+        }
+
+        /**
+         * @brief 获取精度
+         * @return 最大精度
+         */
+        inline uint64_t get_precision() const
+        {
+            return max_bits_;
         }
 
         /**
@@ -989,13 +1000,13 @@ namespace chenc::big_int
          * @return 自身引用
          */
         inline fraction &operator*=(const fraction &value)
-        { 
+        {
             // 符号计算
             is_negative_ ^= value.is_negative_;
             max_bits_ = std::max(max_bits_, value.max_bits_);
 
             numerator_ *= value.numerator_;
-            denominator_ *= value.denominator_; 
+            denominator_ *= value.denominator_;
             simplify();
             return *this;
         }
@@ -1016,12 +1027,12 @@ namespace chenc::big_int
          * @return 自身引用
          */
         inline fraction &operator/=(const fraction &value)
-        { 
+        {
             is_negative_ ^= value.is_negative_;
             max_bits_ = std::max(max_bits_, value.max_bits_);
 
             numerator_ *= value.denominator_;
-            denominator_ *= value.numerator_; 
+            denominator_ *= value.numerator_;
 
             simplify();
             return *this;
@@ -1095,7 +1106,7 @@ namespace chenc::big_int
 
             // 牛顿迭代，带自适应停止条件
             const fraction half(1, 2, new_max_bits);
-            fraction tolerance(1, big_uint::pow(2, std::min(value.max_bits_, precision)) + 4, new_max_bits);
+            fraction tolerance(1, big_uint::pow(2, std::max(value.max_bits_, precision)) + 4, new_max_bits);
 
             for (int i = 0;; i++)
             { // 限制迭代次数
@@ -1332,7 +1343,7 @@ namespace chenc::big_int
          * @note 使用最大公约数化简分子和分母
          */
         void simplify()
-        { 
+        {
             if (numerator_.is_one() || denominator_.is_one())
             {
                 return;
@@ -1354,6 +1365,16 @@ namespace chenc::big_int
                 return;
             }
 
+            // 使用 big_uint 的 GCD 方法化简
+            // 性能影响高，精度关系大
+            big_uint gcd = big_uint::gcd(numerator_, denominator_);
+            // std::cout << "gcd: " << gcd << std::endl;
+            if (gcd > 1)
+            {
+                numerator_ = numerator_ / gcd;
+                denominator_ = denominator_ / gcd;
+            }
+
             // 精度超限
             uint64_t numerator_bits = numerator_.bits();     // 分子
             uint64_t denominator_bits = denominator_.bits(); // 分母
@@ -1373,16 +1394,6 @@ namespace chenc::big_int
                     denominator_ >>= (denominator_bits - max_bits_);
                 }
             }
-
-            // 使用 big_uint 的 GCD 方法化简
-            big_uint gcd = big_uint::gcd(numerator_, denominator_);
-            // std::cout << "gcd: " << gcd << std::endl;
-            if (gcd > 1)
-            {
-                numerator_ = numerator_ / gcd;
-                denominator_ = denominator_ / gcd;
-            }
- 
         }
 
         big_uint numerator_;   // 分子

@@ -1116,7 +1116,7 @@ namespace chenc
                         x.swap(y);
 
                     // 如果两个数大小悬殊，使用模运算而不是减法
-                    constexpr uint64_t bit_diff_threshold = 32;
+                    constexpr uint64_t bit_diff_threshold = 24;
                     if (y.bits() > x.bits() + bit_diff_threshold)
                     {
                         y %= x;
